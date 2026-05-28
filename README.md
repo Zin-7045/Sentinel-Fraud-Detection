@@ -398,6 +398,6 @@ Recommended order:
 
 - **PaySim** dataset for synthetic mobile money transactions (inspiration)
 - Apache Kafka, Spark, scikit-learn, XGBoost, TensorFlow open-source communities
-- Course CSDS4473 Big Data Analytics — University of Central Punjab
+- Course Big Data Analytics 
 
 **Team:** Muhammad Nabeel Arshad, Muhammad Zain, Abdur Rehman (Zin-7045)
