@@ -1,0 +1,264 @@
+================================================================================
+  SENTINEL — BIG DATA ANALYTICS FRAUD DETECTION PROJECT
+  Complete Project Flow (Start to End)
+================================================================================
+
+This document explains how the entire BDA (Big Data Analytics) project runs,
+from the moment you start it to when it's actively detecting fraud.
+
+
+1. STARTING THE PROJECT
+-----------------------
+- Infrastructure (Docker): docker-compose up -d zookeeper kafka postgres redis mongodb spark-master spark-worker kafka-init
+                           (only infra services, skips the slow API Docker build)
+- Backend: python -m uvicorn backend.api.main:app --host 0.0.0.0 --port 8000
+           (run locally to avoid building the API image in Docker)
+- Frontend: cd frontend && npm run dev
+- Kafka Producer: python -c "from backend.streaming.kafka_producer import FraudKafkaProducer; kp = FraudKafkaProducer(); kp.stream_continuous(interval_ms=800)"
+- Or simply run: run.bat (does all of the above automatically)
+
+
+2. INFRASTRUCTURE LAYER (Docker Containers)
+-------------------------------------------
+When docker-compose starts, these services spin up:
+
+  a) Zookeeper       → Manages Kafka cluster coordination
+  b) Kafka Broker    → Message queue for streaming transactions
+  c) PostgreSQL      → Stores all transaction records permanently
+  d) Redis           → In-memory cache for real-time metrics
+  e) MongoDB         → Stores fraud alerts for audit logging
+  f) Spark Master    → Distributed stream processing engine
+  g) Spark Worker    → Executes Spark processing tasks
+  h) Kafka Init      → Creates Kafka topics (txn.raw, txn.enriched,
+                       fraud.alerts, model.predictions)
+
+
+3. DATA INGESTION (Generating Fake Transactions)
+-------------------------------------------------
+- TransactionProducer generates realistic fake transactions
+  with fields: transaction_id, amount, merchant, region, channel,
+  user_id, latitude, longitude, device_id, IP, risk_score, etc.
+- Some transactions are randomly marked as fraud (risk_score > 72
+  or 6% random chance) with a fraud_type like "Card Skimming",
+  "Account Takeover", "Synthetic ID", etc.
+- FraudKafkaProducer sends these generated transactions to
+  Kafka topic "txn.raw" every 800ms (configurable).
+- If a transaction is high-risk (>80 score), an alert is also
+  sent to Kafka topic "fraud.alerts".
+
+
+4. STREAM PROCESSING (Spark Structured Streaming)
+--------------------------------------------------
+- SparkStreamProcessor reads from Kafka topic "txn.raw".
+- Parses the JSON transaction data using a defined schema.
+- Enriches the data by adding:
+    → amount_category (HIGH/MEDIUM/LOW based on amount)
+    → is_high_amount (boolean if > $500)
+    → is_cross_border (boolean if region is APAC/LATAM/ME-AF)
+    → risk_level (CRITICAL/HIGH/MEDIUM/LOW based on risk_score)
+- Writes enriched transactions to Kafka topic "txn.enriched".
+- Also computes fraud counts grouped by region and fraud type,
+  printed to console every 10 seconds.
+
+
+5. FEATURE ENGINEERING
+----------------------
+- FeatureEngineer takes each raw transaction and extracts
+  12 numerical features used by ML models:
+    1.  transaction_amount       (the money amount)
+    2.  velocity_1h              (# of user's txns in last hour)
+    3.  merchant_risk_score      (historical risk of merchant)
+    4.  geo_anomaly_score        (distance from user's usual location)
+    5.  device_fingerprint_match (0 if known device, 0.8 if unknown)
+    6.  time_since_last_txn      (seconds since user's last txn)
+    7.  amount_vs_avg_30d        (how much this deviates from avg)
+    8.  channel_frequency_score   (how often user uses this channel)
+    9.  hour_of_day              (0-23)
+    10. day_of_week              (0-6)
+    11. is_high_amount           (boolean 0/1)
+    12. is_cross_border          (boolean 0/1)
+
+
+6. MACHINE LEARNING MODELS (Ensemble)
+--------------------------------------
+Three ML models work together to predict fraud:
+
+  a) Isolation Forest (Anomaly Detection - Unsupervised)
+     - sklearn.ensemble.IsolationForest
+     - Works by isolating outliers in the feature space
+     - No training labels needed
+     - Best at catching novel/anomalous patterns
+
+  b) XGBoost (Supervised Classification)
+     - xgboost.XGBClassifier with scale_pos_weight=5.0
+     - Gradient boosted decision trees (300 estimators)
+     - Trained on labeled fraud/non-fraud data
+     - Provides feature importance scores
+     - Best at precise classification
+
+   c) LSTM (Deep Learning - Sequence Modeling) [OPTIONAL]
+      - TensorFlow/Keras Sequential LSTM model (only if TensorFlow is installed)
+      - Architecture: LSTM(128) → LSTM(64) → Dense(32) → Dense(1)
+      - Looks at sequences of 10 past transactions per user
+      - Best at detecting temporal patterns in behavior
+      - If TensorFlow is not installed, the ensemble runs on IF + XGBoost only
+
+   d) Ensemble Aggregator
+      - Combines all 3 models using weighted voting:
+        XGBoost: 45% weight (most important)
+        LSTM:    30% weight (skipped if TensorFlow unavailable, remaining
+                 weights redistributed implicitly via threshold)
+        Isolation Forest: 25% weight
+      - If models aren't loaded, falls back to a simple heuristic
+        based on transaction amount
+      - Outputs: fraud_probability, is_fraud (threshold 0.5),
+        risk_score (0-99), model_scores, contributing_factors
+
+
+7. BATCH ETL PIPELINE
+----------------------
+- ETLPipeline processes transactions in batches of 100:
+  a) Extract: Collects transactions from the stream
+  b) Transform: Converts to DataFrame, calculates hour,
+     day_of_week, is_weekend, amount_log, risk_category
+  c) Load:
+     → PostgreSQL: Stores transaction records permanently
+     → Redis: Updates running counters (total count, fraud count,
+       average risk score) for real-time dashboard access
+     → MongoDB: Logs fraud alerts for audit trail
+
+
+8. API LAYER (FastAPI Backend)
+-------------------------------
+FastAPI server runs on port 8000 with these endpoints:
+
+  GET  /health                          → Service health check
+  GET  /api/v1/transactions             → List transactions with filters
+  POST /api/v1/predict                  → Predict fraud for 1 transaction
+  POST /api/v1/predict/batch            → Predict fraud for many transactions
+  GET  /api/v1/metrics                  → Dashboard metrics (from Redis)
+  GET  /api/v1/alerts                   → Recent fraud alerts (from MongoDB)
+  GET  /api/v1/pipeline/status          → Pipeline health status
+
+
+9. FRONTEND DASHBOARD (React.js)
+---------------------------------
+- Built with React + Vite + Recharts
+- Runs on http://localhost:3001
+- Features on the dashboard:
+  → Real-time streaming transaction feed with animated counters
+  → KPI cards: Total transactions, fraud count, avg risk, fraud volume
+  → Time-series charts: 24h transaction stream with fraud overlay
+  → Radar chart: Model performance (Precision, Recall, F1, AUC-ROC)
+  → Heatmap: Fraud rate by region × channel
+  → Entity graph: Network visualization of user-merchant connections
+  → Anomaly clusters: Isolation Forest scatter plot
+  → Pipeline view: End-to-end architecture with live status indicators
+  → Model cards: Per-model performance & feature importance
+  → Alert system: Push notifications for high-risk fraud events
+
+
+10. MONITORING & ALERTS
+-----------------------
+- MetricsCollector runs on a background thread every 15 seconds:
+  → Collects system metrics (CPU, memory, disk I/O, network)
+  → Collects pipeline metrics (avg latency, throughput, counts)
+  → Updates Redis with current metrics
+- AlertManager creates AlertEvents when high-risk fraud is detected
+- Alerts can be sent via:
+  → WebhookNotifier: POST to Slack/Discord webhook URLs
+  → EmailNotifier: Send SMTP email alerts
+- MongoDB stores all alerts with TTL index (7 days auto-expiry)
+
+
+11. MODEL MANAGEMENT
+--------------------
+- ModelRegistry tracks all model versions
+- Models are saved to backend/models/artifacts/ as .pkl files
+- Each model version is stored with metadata: name, version,
+  model_type, created_at, metrics, status (active/standby/archived)
+- Supports promoting/archiving model versions
+
+
+12. DATA FLOW SUMMARY (End-to-End)
+-----------------------------------
+  TransactionProducer (generates fake txns)
+        │
+        ▼
+  Kafka Topic: txn.raw
+        │
+        ├──→ SparkStreamProcessor (reads, enriches)
+        │       │
+        │       ▼
+        │   Kafka Topic: txn.enriched
+        │       │
+        │       ▼
+        │   Console Output (fraud counts by region)
+        │
+        ├──→ FraudKafkaConsumer (reads, predicts)
+        │       │
+        │       ├──→ FeatureEngineer (extracts 12 features)
+        │       ├──→ FraudEnsemble (IF + XGB + LSTM weighted vote)
+        │       ├──→ PostgreSQL (store predictions)
+        │       └──→ MongoDB (store alerts)
+        │
+        ├──→ ETLPipeline (batch of 100)
+        │       │
+        │       ├──→ PostgreSQL (store transactions)
+        │       ├──→ Redis (update counters)
+        │       └──→ MongoDB (store fraud alerts)
+        │
+        ├──→ FastAPI Backend (port 8000)
+        │       │
+        │       └──→ React Frontend (port 3001)
+        │
+        └──→ FraudKafkaProducer (generates alerts)
+                │
+                ▼
+            Kafka Topic: fraud.alerts
+                │
+                ▼
+            AlertConsumer → AlertManager → Webhook/Email
+
+
+13. NOTEBOOKS (Jupyter for Data Science)
+-----------------------------------------
+Three notebooks (saved as .py files) support the data science workflow:
+
+  01_exploratory_data_analysis.py
+    → Generates 5000 transactions
+    → Analyzes amount distribution, fraud rate by region/channel
+    → Visualizes risk score distributions, temporal patterns
+    → Feature correlation analysis
+
+  02_feature_engineering.py
+    → Generates 2000 transactions
+    → Extracts all 12 features using FeatureEngineer
+    → Visualizes feature distributions (clean vs fraud)
+    → PCA dimensionality reduction analysis
+
+  03_model_training.py
+    → Generates 10000 transactions
+    → Trains Isolation Forest + XGBoost models
+    → Trains LSTM sequence model
+    → Evaluates ensemble performance
+    → Saves trained models to artifacts/ directory
+
+
+14. TECHNOLOGIES USED
+----------------------
+  Python 3.11       → Backend APIs & ML pipeline
+  React 18          → Frontend dashboard
+  FastAPI           → REST API framework
+  Apache Kafka      → Real-time message streaming
+  Apache Spark      → Distributed stream processing
+  PostgreSQL        → Relational transaction storage
+  Redis             → In-memory caching
+  MongoDB           → Audit log storage
+  Scikit-learn      → Isolation Forest
+  XGBoost           → Gradient boosting
+  TensorFlow/Keras  → LSTM neural network (optional, skipped if not installed)
+  Docker Compose    → Infrastructure orchestration
+  Recharts          → Dashboard charts
+
+================================================================================

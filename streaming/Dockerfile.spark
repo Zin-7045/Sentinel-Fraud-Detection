@@ -1,0 +1,16 @@
+FROM bitnamilegacy/spark:3.5.1
+
+USER root
+
+RUN pip install --no-cache-dir \
+    kafka-python \
+    pandas \
+    numpy \
+    scikit-learn \
+    xgboost \
+    joblib
+
+COPY spark_batch_analysis.py /opt/streaming/
+COPY spark_job.py /opt/streaming/
+
+WORKDIR /opt/streaming

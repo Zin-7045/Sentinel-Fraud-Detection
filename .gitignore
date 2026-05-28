@@ -1,0 +1,41 @@
+# Dataset
+dataset.csv
+
+# Model artifacts
+backend/models/artifacts/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment
+.env
+*.env.local
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Docker
+docker-data/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Logs
+*.log
